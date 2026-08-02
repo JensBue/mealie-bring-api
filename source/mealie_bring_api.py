@@ -4,6 +4,7 @@ import logging
 import signal
 import sys
 import threading
+import time
 from types import FrameType
 from typing import Union
 
@@ -14,7 +15,8 @@ from source.ingredient import Ingredient, IngredientWithAmountsDisabled
 from source.logger_mixin import LoggerMixin
 from source.mealie_handler import MealieHandler
 
-MOVE_INGREDIENTS_DEBOUNCE_SECONDS = 2
+DEFAULT_MOVE_INGREDIENTS_DEBOUNCE_SECONDS = 2
+SHOPPING_LIST_EVENT_SUPPRESSION_SECONDS = 2
 
 
 class MealieBringAPI:
@@ -28,8 +30,11 @@ class MealieBringAPI:
         self.loop_lock = threading.Lock()
         self.bring_handler = self._create_bring_handler(self.loop)
         self.mealie_handler = MealieHandler()
+        self.move_ingredients_debounce_seconds = self._get_move_ingredients_debounce_seconds()
         self.move_debounce_lock = threading.Lock()
         self.move_debounce_timer: threading.Timer | None = None
+        self.move_export_is_running = False
+        self.ignore_shopping_list_events_until = 0.0
         self.app = self._create_app()
 
         signal.signal(signal.SIGTERM, self._handle_stop_signal)
@@ -50,6 +55,19 @@ class MealieBringAPI:
     @staticmethod
     def _create_bring_handler(loop: asyncio.AbstractEventLoop) -> BringHandler:
         return BringHandler(loop)
+
+    @staticmethod
+    def _get_move_ingredients_debounce_seconds() -> int:
+        raw_value = EnvironmentVariableGetter.get(
+            "SHOPPING_LIST_DEBOUNCE_SECONDS", DEFAULT_MOVE_INGREDIENTS_DEBOUNCE_SECONDS
+        )
+
+        try:
+            debounce_seconds = int(raw_value)
+        except (TypeError, ValueError):
+            debounce_seconds = DEFAULT_MOVE_INGREDIENTS_DEBOUNCE_SECONDS
+
+        return max(debounce_seconds, 1)
 
     def _create_app(self) -> Flask:
         base_bp = Blueprint("base_bp", __name__, url_prefix=self.basepath)
@@ -138,15 +156,19 @@ class MealieBringAPI:
 
     def _schedule_move_ingredients_from_shopping_list(self) -> None:
         with self.move_debounce_lock:
+            if self.move_export_is_running or time.monotonic() < self.ignore_shopping_list_events_until:
+                self.logger.log.info("Ignoring shopping list event caused by active export")
+                return
+
             if self.move_debounce_timer is not None:
                 self.move_debounce_timer.cancel()
 
             self.logger.log.info(
-                f"Shopping list changed, moving items to Bring in {MOVE_INGREDIENTS_DEBOUNCE_SECONDS}s "
+                f"Shopping list changed, moving items to Bring in {self.move_ingredients_debounce_seconds}s "
                 "if no further changes occur"
             )
             self.move_debounce_timer = threading.Timer(
-                MOVE_INGREDIENTS_DEBOUNCE_SECONDS, self._run_debounced_move_ingredients_from_shopping_list
+                self.move_ingredients_debounce_seconds, self._run_debounced_move_ingredients_from_shopping_list
             )
             self.move_debounce_timer.daemon = True
             self.move_debounce_timer.start()
@@ -154,15 +176,28 @@ class MealieBringAPI:
     def _run_debounced_move_ingredients_from_shopping_list(self) -> None:
         with self.move_debounce_lock:
             self.move_debounce_timer = None
+            self.move_export_is_running = True
 
-        self._move_ingredients_from_shopping_list_to_bring()
+        try:
+            self._move_ingredients_from_shopping_list_to_bring()
+        finally:
+            with self.move_debounce_lock:
+                self.move_export_is_running = False
 
     def _move_ingredients_from_shopping_list_to_bring(self) -> None:
         self.logger.log.info("Moving ingredients from shopping list to Bring")
 
         items_on_shopping_list = self.mealie_handler.get_items_on_shopping_list()
+        if not items_on_shopping_list:
+            self.logger.log.info("Shopping list is empty, nothing to move")
+            return
+
         self._add_ingredients_to_bring([Ingredient.from_raw_data(item) for item in items_on_shopping_list])
-        self.mealie_handler.delete_items_from_shopping_list(items_on_shopping_list)
+        try:
+            self.mealie_handler.delete_items_from_shopping_list(items_on_shopping_list)
+        finally:
+            with self.move_debounce_lock:
+                self.ignore_shopping_list_events_until = time.monotonic() + SHOPPING_LIST_EVENT_SUPPRESSION_SECONDS
 
     def _add_ingredients_to_bring(self, ingredients_to_add: list[Ingredient]) -> None:
         if not ingredients_to_add:

@@ -6,7 +6,12 @@ import pytest
 from source.bring_handler import BringHandler
 from source.ingredient import Ingredient
 from source.logger_mixin import LoggerMixin
-from source.mealie_bring_api import Flask, MealieBringAPI
+from source.mealie_bring_api import (
+    DEFAULT_MOVE_INGREDIENTS_DEBOUNCE_SECONDS,
+    SHOPPING_LIST_EVENT_SUPPRESSION_SECONDS,
+    Flask,
+    MealieBringAPI,
+)
 from source.mealie_handler import MealieHandler
 
 
@@ -42,6 +47,7 @@ def mock_mealie_handler():
 
 @pytest.fixture
 def mealie_app(monkeypatch, mock_event_loop, mock_bring_handler, mock_flask_app, mock_mealie_handler):
+    monkeypatch.delenv("SHOPPING_LIST_DEBOUNCE_SECONDS", raising=False)
     monkeypatch.setattr(MealieBringAPI, "_create_logger", lambda self: LoggerMixin())
     monkeypatch.setattr(MealieBringAPI, "_create_event_loop", lambda self: mock_event_loop)
     monkeypatch.setattr(MealieBringAPI, "_create_bring_handler", lambda self, loop: mock_bring_handler)
@@ -49,6 +55,28 @@ def mealie_app(monkeypatch, mock_event_loop, mock_bring_handler, mock_flask_app,
     monkeypatch.setattr("source.mealie_bring_api.MealieHandler", lambda: mock_mealie_handler)
 
     return MealieBringAPI()
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected_value"),
+    [
+        (None, DEFAULT_MOVE_INGREDIENTS_DEBOUNCE_SECONDS),
+        ("", DEFAULT_MOVE_INGREDIENTS_DEBOUNCE_SECONDS),
+        ("invalid", DEFAULT_MOVE_INGREDIENTS_DEBOUNCE_SECONDS),
+        ("0", 1),
+        ("-5", 1),
+        ("60", 60),
+    ],
+)
+def test_get_move_ingredients_debounce_seconds(monkeypatch, env_value, expected_value):
+    if env_value is None:
+        monkeypatch.delenv("SHOPPING_LIST_DEBOUNCE_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("SHOPPING_LIST_DEBOUNCE_SECONDS", env_value)
+
+    result = MealieBringAPI._get_move_ingredients_debounce_seconds()
+
+    assert result == expected_value
 
 
 def test_process_recipe_data_with_enabled_amount(mealie_app, example_request):
@@ -150,6 +178,56 @@ def test_move_ingredients_from_shopping_list_to_bring(mealie_app):
     mealie_app.mealie_handler.delete_items_from_shopping_list.assert_called_once_with(items_on_shopping_list)
 
 
+def test_move_ingredients_from_empty_shopping_list_does_not_call_bring_or_delete(mealie_app, caplog):
+    mealie_app.mealie_handler.get_items_on_shopping_list.return_value = []
+
+    with patch.object(mealie_app, "_add_ingredients_to_bring") as mock_add_ingredients_to_bring:
+        mealie_app._move_ingredients_from_shopping_list_to_bring()
+
+    mock_add_ingredients_to_bring.assert_not_called()
+    mealie_app.mealie_handler.delete_items_from_shopping_list.assert_not_called()
+    assert "Shopping list is empty, nothing to move" in caplog.text
+
+
+def test_schedule_move_ingredients_ignores_events_during_active_export(mealie_app, caplog):
+    mealie_app.move_export_is_running = True
+
+    with patch("source.mealie_bring_api.threading.Timer") as mock_timer_cls:
+        mealie_app._schedule_move_ingredients_from_shopping_list()
+
+    mock_timer_cls.assert_not_called()
+    assert "Ignoring shopping list event caused by active export" in caplog.text
+
+
+def test_schedule_move_ingredients_ignores_events_during_suppression_window(mealie_app, caplog):
+    mealie_app.ignore_shopping_list_events_until = 10
+
+    with (
+        patch("source.mealie_bring_api.time.monotonic", return_value=9),
+        patch("source.mealie_bring_api.threading.Timer") as mock_timer_cls,
+    ):
+        mealie_app._schedule_move_ingredients_from_shopping_list()
+
+    mock_timer_cls.assert_not_called()
+    assert "Ignoring shopping list event caused by active export" in caplog.text
+
+
+def test_schedule_move_ingredients_processes_user_change_after_suppression_window(mealie_app):
+    mealie_app.ignore_shopping_list_events_until = 10
+
+    with (
+        patch("source.mealie_bring_api.time.monotonic", return_value=11),
+        patch("source.mealie_bring_api.threading.Timer") as mock_timer_cls,
+    ):
+        mock_timer_instance = MagicMock()
+        mock_timer_cls.return_value = mock_timer_instance
+
+        mealie_app._schedule_move_ingredients_from_shopping_list()
+
+    mock_timer_cls.assert_called_once_with(2, mealie_app._run_debounced_move_ingredients_from_shopping_list)
+    mock_timer_instance.start.assert_called_once()
+
+
 def test_schedule_move_ingredients_starts_timer(mealie_app):
     with patch("source.mealie_bring_api.threading.Timer") as mock_timer_cls:
         mock_timer_instance = MagicMock()
@@ -162,6 +240,17 @@ def test_schedule_move_ingredients_starts_timer(mealie_app):
     assert mealie_app.move_debounce_timer is mock_timer_instance
 
 
+def test_schedule_move_ingredients_uses_configured_debounce_seconds(mealie_app):
+    mealie_app.move_ingredients_debounce_seconds = 60
+
+    with patch("source.mealie_bring_api.threading.Timer") as mock_timer_cls:
+        mock_timer_cls.return_value = MagicMock()
+
+        mealie_app._schedule_move_ingredients_from_shopping_list()
+
+    mock_timer_cls.assert_called_once_with(60, mealie_app._run_debounced_move_ingredients_from_shopping_list)
+
+
 def test_schedule_move_ingredients_cancels_previous_pending_timer(mealie_app):
     previous_timer = MagicMock()
     mealie_app.move_debounce_timer = previous_timer
@@ -171,6 +260,68 @@ def test_schedule_move_ingredients_cancels_previous_pending_timer(mealie_app):
         mealie_app._schedule_move_ingredients_from_shopping_list()
 
     previous_timer.cancel.assert_called_once()
+
+
+def test_single_shopping_list_change_runs_one_export(mealie_app):
+    with (
+        patch("source.mealie_bring_api.threading.Timer") as mock_timer_cls,
+        patch.object(mealie_app, "_move_ingredients_from_shopping_list_to_bring") as mock_move,
+    ):
+        mock_timer = MagicMock()
+        mock_timer_cls.return_value = mock_timer
+
+        mealie_app._schedule_move_ingredients_from_shopping_list()
+        mock_timer_cls.call_args.args[1]()
+
+    mock_move.assert_called_once()
+
+
+def test_multiple_shopping_list_changes_within_debounce_run_one_export(mealie_app):
+    timers = []
+
+    def create_timer(_seconds, callback):
+        timer = MagicMock()
+        timer.callback = callback
+        timers.append(timer)
+        return timer
+
+    with (
+        patch("source.mealie_bring_api.threading.Timer", side_effect=create_timer),
+        patch.object(mealie_app, "_move_ingredients_from_shopping_list_to_bring") as mock_move,
+    ):
+        mealie_app._schedule_move_ingredients_from_shopping_list()
+        mealie_app._schedule_move_ingredients_from_shopping_list()
+        timers[1].callback()
+
+    timers[0].cancel.assert_called_once()
+    mock_move.assert_called_once()
+
+
+def test_delete_events_after_export_do_not_schedule_second_export(mealie_app):
+    items_on_shopping_list = [{"id": "1"}, {"id": "2"}, {"id": "3"}, {"id": "4"}]
+    mealie_app.mealie_handler.get_items_on_shopping_list.return_value = items_on_shopping_list
+
+    with (
+        patch("source.mealie_bring_api.Ingredient.from_raw_data", side_effect=lambda item: item),
+        patch.object(mealie_app, "_add_ingredients_to_bring"),
+        patch("source.mealie_bring_api.threading.Timer") as mock_timer_cls,
+        patch("source.mealie_bring_api.time.monotonic", side_effect=[100, 101, 101, 101, 101]),
+    ):
+
+        def delete_items(_items):
+            mealie_app._schedule_move_ingredients_from_shopping_list()
+            mealie_app._schedule_move_ingredients_from_shopping_list()
+            mealie_app._schedule_move_ingredients_from_shopping_list()
+            mealie_app._schedule_move_ingredients_from_shopping_list()
+
+        mealie_app.mealie_handler.delete_items_from_shopping_list.side_effect = delete_items
+
+        mealie_app._run_debounced_move_ingredients_from_shopping_list()
+        mealie_app._schedule_move_ingredients_from_shopping_list()
+
+    mealie_app.mealie_handler.delete_items_from_shopping_list.assert_called_once_with(items_on_shopping_list)
+    mock_timer_cls.assert_not_called()
+    assert mealie_app.ignore_shopping_list_events_until == 100 + SHOPPING_LIST_EVENT_SUPPRESSION_SECONDS
 
 
 def test_run_debounced_move_ingredients_clears_timer_and_moves(mealie_app):

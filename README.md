@@ -60,6 +60,7 @@ No matter which deployment option you chose, you must set up some environment va
 | `MEALIE_BASE_URL`           | The base URL of your Mealie instance. You can use the name of the container if both apps are running in the same Docker network. This bypasses any reverse proxy you might have set up; do this if you are running some sort of OIDC provider. |    No    | -         | `http://mealie:9000` or `https://mealie.yourdomain.com` | 2                   |
 | `MEALIE_API_KEY`            | The API key for your Mealie instance. Can be generated in Mealie under `https://mealie.yourdomain.com/user/profile/api-tokens`                                                                                                                 |    No    | -         | `mealie_api_key_123456`                                 | 2                   |
 | `MEALIE_SHOPPING_LIST_UUID` | The UUID of the shopping list you want to pull items from. If not specified, items from all shopping lists will be pulled                                                                                                                      |    No    | -         | `12345678-1234-1234-1234-12345678`                      | 2                   |
+| `SHOPPING_LIST_DEBOUNCE_SECONDS` | The number of seconds to wait after a shopping list change before moving items to Bring. Further changes during this time reset the timer                                                                                               |    No    | `2`       | `60`                                                    | 2                   |
 | `LOG_LEVEL`                 | The loglevel the application logs at                                                                                                                                                                                                           |    No    | `INFO`    | `DEBUG`                                                 | 1, 2                |
 | `HTTP_HOST`                 | The address the application tries to attach to, leave this empty to listen on all interfaces, leave this empty if you are using Docker                                                                                                         |    No    | `0.0.0.0` | `192.168.1.5`                                           | 1, 2                |
 | `HTTP_PORT`                 | The port the application listens on, change this if needed if you run the application locally, leave this empty if you are using Docker                                                                                                        |    No    | `8742`    | `1234`                                                  | 1, 2                |
@@ -148,6 +149,7 @@ If you want to use this action, you first need to:
    - `MEALIE_BASE_URL`: The base URL of your Mealie instance
    - `MEALIE_API_KEY`: The API key you just generated
    - `MEALIE_SHOPPING_LIST_UUID` (optional): If you want to pull items from a specific shopping list only. The items of all shopping lists will be pulled if this is empty.
+   - `SHOPPING_LIST_DEBOUNCE_SECONDS` (optional): How long automatic triggering waits for the shopping list to stop changing before moving items to Bring. Defaults to `2` seconds.
 
 You then have to decide **how** this action gets triggered. There are two options, and they are mutually exclusive.
 Which one fits you depends entirely on whether you still want to use Mealie's own shopping list for anything:
@@ -186,8 +188,8 @@ To set it up:
    ![adding notifier](./assets/images/adding_notifier.png)
 5. Save it. From now on, every change to your Mealie shopping list (adding an item manually, or bulk-adding all
    ingredients of a recipe via `Add to List`) will trigger the move to Bring automatically. Since Mealie sends one
-   notification per changed item, this webserver waits a couple of seconds for the shopping list to settle before moving
-   everything over in one go, so bulk-adding a whole recipe doesn't create duplicates in Bring.
+   notification per changed item, this webserver waits for the configured debounce time for the shopping list to settle
+   before moving everything over in one go, so bulk-adding a whole recipe doesn't create duplicates in Bring.
 
 ### Usage
 
