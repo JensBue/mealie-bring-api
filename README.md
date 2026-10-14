@@ -135,18 +135,18 @@ After deploying the container, you need to set up the actions you want to use.
    ![actions after adding](./assets/images/actions_after_adding.png)
 7. Try it out 🎉
 
-#### Additional action: Adding mealplan notes to Bring for an explicit date range
+#### Planner-Notizen zur Mealie-Einkaufsliste
 
-Mealie's built-in recipe action sends the selected recipe to the integration, but does not include the currently displayed mealplan date range. The shopping-list notifier likewise contains no reliable range. This action therefore takes explicit start and end dates in its URL; it never guesses dates. On Mealie 3.26 and later, allow the bridge host in Mealie's HTTP_ALLOW_LIST (in this deployment: mealie-bring-api).
-
-1. Create another Mealie recipe action.
-2. Set its method to POST.
-3. Set the URL to the Bring API endpoint and specify the exact inclusive date range, for example:
-   http://mealie-bring-api:8742/move-ingredients-from-mealplan?start_date=2026-10-12&end_date=2026-10-18
-4. Give it a clear title such as “Mealplan-Notizen zur Bring-Liste”.
-5. Save and trigger it from any recipe when that configured period is the one to transfer.
-
-The integration reads /api/households/mealplans with those dates, selects note-only entries (entries without recipeId) and sends each non-empty title to Bring as-is. It ignores recipe entries, filters the returned data again to the requested dates, skips duplicates already present on the configured Mealie shopping list or Bring list, and never deletes or edits Mealie entries. Update the dates in the action URL before using it for a different period. The normal recipe action and shopping-list workflow are unchanged.
+Der Mealie-Planner enthält den Button **Notizen zur Einkaufsliste**. Er sendet
+den sichtbaren Zeitraum über start_date und end_date an
+/add-mealplan-notes-to-shopping-list. Die Bridge fügt reine, nichtleere Notizen
+als normale Artikel in die konfigurierte Mealie-Einkaufsliste ein. Bestehende
+Artikel und doppelte Notizen (getrimmt und ohne Beachtung der Großschreibung)
+werden übersprungen. Mealie veröffentlicht beim Erstellen das Ereignis
+shoppingListUpdated, das den bestehenden Notifier und damit den normalen
+Mealie-zu-Bring-Ablauf auslöst. Der Planner-Endpunkt ruft Bring nicht direkt
+auf. Bei mehreren Einkaufslisten muss MEALIE_SHOPPING_LIST_UUID gesetzt sein;
+ohne UUID wird nur eine einzige vorhandene Liste akzeptiert.
 
 #### Action 2: Moving ingredients from a shopping list to Bring (optional)
 

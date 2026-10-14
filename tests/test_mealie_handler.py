@@ -253,3 +253,47 @@ def test_get_mealplan_entries_uses_explicit_range_and_filters_unexpected_dates(m
         headers={"Authorization": f"Bearer {mealie_handler.mealie_api_key}"},
         timeout=20,
     )
+
+
+def test_add_shopping_list_notes_posts_normal_mealie_items(mealie_handler, mock_response):
+    mock_response.json.return_value = {"createdItems": [{"id": "one"}, {"id": "two"}]}
+    with patch("requests.post", return_value=mock_response) as mock_post:
+        created = mealie_handler.add_shopping_list_notes("target-list", ["Pommes", "Baguette"])
+
+    assert created == 2
+    mock_post.assert_called_once_with(
+        f"{mealie_handler.mealie_base_url}/api/households/shopping/items/create-bulk",
+        json=[
+            {"shoppingListId": "target-list", "quantity": 0, "foodId": None, "unitId": None, "note": "Pommes", "checked": False},
+            {"shoppingListId": "target-list", "quantity": 0, "foodId": None, "unitId": None, "note": "Baguette", "checked": False},
+        ],
+        headers={"Authorization": f"Bearer {mealie_handler.mealie_api_key}"},
+        timeout=20,
+    )
+    mock_response.raise_for_status.assert_called_once()
+
+
+def test_add_shopping_list_notes_empty_payload_does_not_call_mealie(mealie_handler):
+    with patch("requests.post") as mock_post:
+        assert mealie_handler.add_shopping_list_notes("target-list", []) == 0
+    mock_post.assert_not_called()
+
+
+def test_target_shopping_list_resolves_only_unambiguous_list(mealie_handler, mock_response):
+    mealie_handler.shopping_list_uuid = ""
+    mock_response.json.return_value = {"items": [{"id": "only-list"}]}
+    with patch("requests.get", return_value=mock_response) as mock_get:
+        assert mealie_handler.get_target_shopping_list_id() == "only-list"
+    mock_get.assert_called_once_with(
+        f"{mealie_handler.mealie_base_url}/api/households/shopping/lists?perPage=-1",
+        headers={"Authorization": f"Bearer {mealie_handler.mealie_api_key}"},
+        timeout=20,
+    )
+
+
+def test_target_shopping_list_requires_config_when_ambiguous(mealie_handler, mock_response):
+    mealie_handler.shopping_list_uuid = ""
+    mock_response.json.return_value = {"items": [{"id": "one"}, {"id": "two"}]}
+    with patch("requests.get", return_value=mock_response):
+        with pytest.raises(ValueError, match="MEALIE_SHOPPING_LIST_UUID"):
+            mealie_handler.get_target_shopping_list_id()

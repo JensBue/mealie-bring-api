@@ -361,7 +361,7 @@ def test_handle_stop_signal_flushes_pending_debounced_move(mealie_app):
 
 
 def test_mealplan_note_text_ignores_recipes_and_invalid_notes():
-    assert MealieBringAPI._mealplan_note_text({"title": "  TK-Pizza  "}) == "TK-Pizza"
+    assert MealieBringAPI._mealplan_note_text({"title": "  TK-Pizza  "}) == "  TK-Pizza  "
     assert MealieBringAPI._mealplan_note_text({"title": "Pommes", "recipeId": "recipe-1"}) is None
     assert MealieBringAPI._mealplan_note_text({"title": "Pommes", "recipe": {"id": "recipe-1"}}) is None
     assert MealieBringAPI._mealplan_note_text({"title": "   "}) is None
@@ -369,72 +369,96 @@ def test_mealplan_note_text_ignores_recipes_and_invalid_notes():
     assert MealieBringAPI._mealplan_note_text({}) is None
 
 
-@pytest.mark.parametrize(
-    ("entries", "shopping_names", "bring_names", "expected"),
-    [
-        (
-            [{"title": "Schnitzel", "recipeId": "recipe-1"}],
-            [],
-            set(),
-            [],
-        ),
-        (
-            [{"title": "Schnitzel", "recipeId": "recipe-1"}, {"title": "Pommes"}],
-            [],
-            set(),
-            ["Pommes"],
-        ),
-        (
-            [{"title": "Pommes"}, {"title": "Baguette"}, {"title": "Coleslaw"}],
-            [],
-            set(),
-            ["Pommes", "Baguette", "Coleslaw"],
-        ),
-        (
-            [{"title": "TK-Pizza"}, {"title": "  "}, {"title": ""}],
-            [],
-            set(),
-            ["TK-Pizza"],
-        ),
-        (
-            [{"title": "Pommes"}, {"title": " pommes "}, {"title": "Baguette"}],
-            [],
-            set(),
-            ["Pommes", "Baguette"],
-        ),
-        (
-            [{"title": "Pommes"}, {"title": "Baguette"}, {"title": "TK-Pizza"}],
-            [" pommes "],
-            {"Baguette"},
-            ["TK-Pizza"],
-        ),
-        (
-            [{"title": "  Grüner Salat mit Öl  "}],
-            [],
-            set(),
-            ["Grüner Salat mit Öl"],
-        ),
-    ],
-)
-def test_move_mealplan_notes_to_bring_filters_and_deduplicates(
-    mealie_app, entries, shopping_names, bring_names, expected
-):
+def test_mealplan_notes_are_added_as_mealie_shopping_items(mealie_app):
     from datetime import date
 
-    mealie_app.mealie_handler.get_mealplan_entries.return_value = entries
-    mealie_app.mealie_handler.get_shopping_item_names.return_value = shopping_names
-    mealie_app.bring_handler.get_existing_item_names = lambda: bring_names
-    mealie_app.loop.run_until_complete.side_effect = lambda result: result
+    mealie_app.mealie_handler.get_mealplan_entries.return_value = [
+        {"date": "2026-10-19", "title": "Pommes"},
+        {"date": "2026-10-20", "title": "Baguette"},
+        {"date": "2026-10-21", "title": "Schnitzel", "recipeId": "recipe-id"},
+    ]
+    mealie_app.mealie_handler.get_target_shopping_list_id.return_value = "target-list"
+    mealie_app.mealie_handler.get_shopping_item_names.return_value = ["Salz"]
+    mealie_app.mealie_handler.add_shopping_list_notes.return_value = 2
 
-    with patch.object(mealie_app, "_add_ingredients_to_bring") as add_items:
-        mealie_app._move_mealplan_notes_to_bring(date(2026, 10, 14), date(2026, 10, 18))
+    result = mealie_app._add_mealplan_notes_to_shopping_list(date(2026, 10, 19), date(2026, 10, 24))
 
-    if expected:
-        added = add_items.call_args.args[0]
-        assert [item.name for item in added] == expected
-        assert all(item.specification is None for item in added)
-    else:
-        add_items.assert_not_called()
+    assert result == {"added": 2, "skipped_duplicates": 0}
+    mealie_app.mealie_handler.add_shopping_list_notes.assert_called_once_with("target-list", ["Pommes", "Baguette"])
+    mealie_app.bring_handler.add_items.assert_not_awaited()
+    mealie_app.bring_handler.notify_users_about_changes_in_list.assert_not_awaited()
+
+
+def test_mealplan_notes_exclude_out_of_range_and_empty_notes(mealie_app):
+    from datetime import date
+
+    mealie_app.mealie_handler.get_mealplan_entries.return_value = [
+        {"date": "2026-10-18", "title": "Vorher"},
+        {"date": "2026-10-25", "title": "Nachher"},
+        {"date": "2026-10-20", "title": "   "},
+        {"date": "2026-10-21", "title": "Im Zeitraum"},
+    ]
+    mealie_app.mealie_handler.add_shopping_list_notes.return_value = 1
+
+    result = mealie_app._add_mealplan_notes_to_shopping_list(date(2026, 10, 19), date(2026, 10, 24))
+
+    assert result == {"added": 1, "skipped_duplicates": 0}
+    mealie_app.mealie_handler.add_shopping_list_notes.assert_called_once_with(
+        mealie_app.mealie_handler.get_target_shopping_list_id.return_value, ["Im Zeitraum"]
+    )
+
+
+def test_mealplan_note_duplicates_are_skipped_case_insensitively(mealie_app):
+    from datetime import date
+
+    mealie_app.mealie_handler.get_mealplan_entries.return_value = [
+        {"date": "2026-10-19", "title": "Pommes"},
+        {"date": "2026-10-20", "title": " pommes "},
+        {"date": "2026-10-21", "title": "BAGUETTE"},
+    ]
+    mealie_app.mealie_handler.get_shopping_item_names.return_value = ["  baguette  "]
+    mealie_app.mealie_handler.add_shopping_list_notes.return_value = 1
+
+    result = mealie_app._add_mealplan_notes_to_shopping_list(date(2026, 10, 19), date(2026, 10, 24))
+
+    assert result == {"added": 1, "skipped_duplicates": 1}
+    mealie_app.mealie_handler.add_shopping_list_notes.assert_called_once_with(
+        mealie_app.mealie_handler.get_target_shopping_list_id.return_value, ["Pommes"]
+    )
+
+
+def test_existing_shopping_items_are_only_read_and_never_changed(mealie_app):
+    from datetime import date
+
+    mealie_app.mealie_handler.get_mealplan_entries.return_value = [{"date": "2026-10-19", "title": "Pommes"}]
+    mealie_app.mealie_handler.get_shopping_item_names.return_value = [" Pommes "]
+    mealie_app.mealie_handler.add_shopping_list_notes.return_value = 0
+
+    result = mealie_app._add_mealplan_notes_to_shopping_list(date(2026, 10, 19), date(2026, 10, 24))
+
+    assert result == {"added": 0, "skipped_duplicates": 1}
+    mealie_app.mealie_handler.add_shopping_list_notes.assert_called_once_with(
+        mealie_app.mealie_handler.get_target_shopping_list_id.return_value, []
+    )
+    mealie_app.mealie_handler.delete_items_from_shopping_list.assert_not_called()
+    mealie_app.bring_handler.add_items.assert_not_awaited()
+
+
+def test_mealplan_note_range_route_uses_visible_dates_and_returns_counts(mealie_app):
+    from datetime import date
+    from flask import Flask
+
+    mealie_app.mealie_handler.mealie_is_setup = True
+    mealie_app._add_mealplan_notes_to_shopping_list = MagicMock(return_value={"added": 3, "skipped_duplicates": 1})
+    with patch("source.mealie_bring_api.app", Flask("test-mealie-bring")):
+        test_app = _REAL_CREATE_APP(mealie_app)
+    response = test_app.test_client().post(
+        "/add-mealplan-notes-to-shopping-list?start_date=2026-10-19&end_date=2026-10-24"
+    )
+
+    assert response.status_code == 200
+    assert response.json == {"added": 3, "skipped_duplicates": 1}
+    mealie_app._add_mealplan_notes_to_shopping_list.assert_called_once_with(date(2026, 10, 19), date(2026, 10, 24))
 
 
 def test_mealplan_note_range_validation_route(mealie_app):
@@ -444,10 +468,7 @@ def test_mealplan_note_range_validation_route(mealie_app):
     with patch("source.mealie_bring_api.app", Flask("test-mealie-bring")):
         test_app = _REAL_CREATE_APP(mealie_app)
     client = test_app.test_client()
-
-    missing_dates = client.post("/move-ingredients-from-mealplan")
-    reversed_dates = client.post(
-        "/move-ingredients-from-mealplan?start_date=2026-10-19&end_date=2026-10-14"
-    )
-    assert missing_dates.status_code == 400
-    assert reversed_dates.status_code == 400
+    assert client.post("/add-mealplan-notes-to-shopping-list").status_code == 400
+    assert client.post(
+        "/add-mealplan-notes-to-shopping-list?start_date=2026-10-19&end_date=2026-10-14"
+    ).status_code == 400

@@ -7,9 +7,11 @@ import sys
 import threading
 import time
 from types import FrameType
+
+import requests
 from typing import Union
 
-from flask import Blueprint, Flask, request
+from flask import Blueprint, Flask, jsonify, request
 from source.bring_handler import BringHandler
 from source.environment_variable_getter import EnvironmentVariableGetter
 from source.ingredient import Ingredient, IngredientWithAmountsDisabled
@@ -92,20 +94,24 @@ class MealieBringAPI:
 
             return "OK"
 
-        @base_bp.route("/move-ingredients-from-mealplan", methods=["POST"])
-        def move_mealplan_notes_to_bring() -> str | tuple[str, int]:
+        @base_bp.route("/add-mealplan-notes-to-shopping-list", methods=["POST"])
+        def add_mealplan_notes_to_shopping_list():
             if not self.mealie_handler.mealie_is_setup:
                 self.logger.log.warning("Mealie is not setup! See the logs above for more information.")
-                return "", 400
+                return jsonify(error="Mealie ist nicht eingerichtet."), 400
             try:
                 start_date = date.fromisoformat(request.args.get("start_date", ""))
                 end_date = date.fromisoformat(request.args.get("end_date", ""))
             except ValueError:
-                return "Valid start_date and end_date are required (YYYY-MM-DD).", 400
+                return jsonify(error="Gültige Start- und Enddaten sind erforderlich (JJJJ-MM-TT)."), 400
             if end_date < start_date:
-                return "end_date must be on or after start_date.", 400
-            self._move_mealplan_notes_to_bring(start_date, end_date)
-            return "OK"
+                return jsonify(error="Das Enddatum muss am oder nach dem Startdatum liegen."), 400
+            try:
+                result = self._add_mealplan_notes_to_shopping_list(start_date, end_date)
+            except (requests.RequestException, ValueError) as error:
+                self.logger.log.exception("Could not add mealplan notes to Mealie shopping list")
+                return jsonify(error=str(error)), 502
+            return jsonify(result)
 
         @base_bp.route("/status", methods=["GET"])
         def status_handler() -> str:
@@ -217,7 +223,7 @@ class MealieBringAPI:
 
     @staticmethod
     def _normalize_duplicate_key(value: str) -> str:
-        return " ".join(value.split()).casefold()
+        return value.strip().casefold()
 
     @staticmethod
     def _mealplan_note_text(entry: dict) -> str | None:
@@ -226,41 +232,42 @@ class MealieBringAPI:
         title = entry.get("title")
         if not isinstance(title, str) or not title.strip():
             return None
-        return title.strip()
+        return title
 
-    def _move_mealplan_notes_to_bring(self, start_date: date, end_date: date) -> None:
+    def _add_mealplan_notes_to_shopping_list(self, start_date: date, end_date: date) -> dict[str, int]:
         entries = self.mealie_handler.get_mealplan_entries(start_date, end_date)
-        candidates: list[Ingredient] = []
+        candidates: list[str] = []
         seen: set[str] = set()
         for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("date"):
+                continue
+            if not start_date.isoformat() <= str(entry["date"])[:10] <= end_date.isoformat():
+                continue
             note = self._mealplan_note_text(entry)
             if note is None:
                 continue
             key = self._normalize_duplicate_key(note)
-            if key and key not in seen:
+            if key not in seen:
                 seen.add(key)
-                candidates.append(Ingredient(name=note))
-        if not candidates:
-            self.logger.log.info("No mealplan notes found in the requested date range")
-            return
+                candidates.append(note)
 
+        if not candidates:
+            return {"added": 0, "skipped_duplicates": 0}
+
+        target_list_id = self.mealie_handler.get_target_shopping_list_id()
         existing_names = {
             self._normalize_duplicate_key(name)
-            for name in self.mealie_handler.get_shopping_item_names()
+            for name in self.mealie_handler.get_shopping_item_names(target_list_id)
             if isinstance(name, str) and name.strip()
         }
-        with self.loop_lock:
-            existing_names.update(
-                self._normalize_duplicate_key(name)
-                for name in self.loop.run_until_complete(self.bring_handler.get_existing_item_names())
-                if isinstance(name, str) and name.strip()
-            )
-        additions = [item for item in candidates if self._normalize_duplicate_key(item.name) not in existing_names]
+        additions = [note for note in candidates if self._normalize_duplicate_key(note) not in existing_names]
+        added = self.mealie_handler.add_shopping_list_notes(target_list_id, additions)
+        skipped = len(candidates) - added
         self.logger.log.info(
-            "Mealplan note transfer for %s through %s: %d note(s), %d new item(s)",
-            start_date.isoformat(), end_date.isoformat(), len(candidates), len(additions),
+            "Added %d mealplan note(s) to Mealie shopping list; %d duplicate(s) skipped",
+            added, skipped,
         )
-        self._add_ingredients_to_bring(additions)
+        return {"added": added, "skipped_duplicates": skipped}
 
     def _add_ingredients_to_bring(self, ingredients_to_add: list[Ingredient]) -> None:
         if not ingredients_to_add:

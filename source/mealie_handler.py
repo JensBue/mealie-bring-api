@@ -73,14 +73,65 @@ class MealieHandler(LoggerMixin):
 
         return items_on_shopping_list
 
-    def get_shopping_item_names(self) -> list[str]:
+    def get_shopping_item_names(self, shopping_list_id: str | None = None) -> list[str]:
         names = []
-        for item in self.get_items_on_shopping_list():
+        items = self.get_items_on_shopping_list()
+        if shopping_list_id is not None:
+            items = [item for item in items if item.get("shoppingListId") == shopping_list_id]
+        for item in items:
             for key in ("display", "note"):
                 value = item.get(key)
                 if isinstance(value, str) and value.strip():
                     names.append(value.strip())
         return names
+
+    def get_target_shopping_list_id(self) -> str:
+        if self.shopping_list_uuid:
+            return self.shopping_list_uuid
+
+        response = requests.get(
+            f"{self.mealie_base_url}/api/households/shopping/lists?perPage=-1",
+            headers={"Authorization": f"Bearer {self.mealie_api_key}"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json()
+        lists = data if isinstance(data, list) else data.get("items", []) if isinstance(data, dict) else []
+        if len(lists) != 1 or not isinstance(lists[0], dict) or not lists[0].get("id"):
+            raise ValueError(
+                "Die Ziel-Einkaufsliste ist nicht eindeutig. Bitte MEALIE_SHOPPING_LIST_UUID konfigurieren."
+            )
+        return str(lists[0]["id"])
+
+    def add_shopping_list_notes(self, shopping_list_id: str, notes: list[str]) -> int:
+        if not notes:
+            return 0
+        payload = [
+            {
+                "shoppingListId": shopping_list_id,
+                "quantity": 0,
+                "foodId": None,
+                "unitId": None,
+                "note": note,
+                "checked": False,
+            }
+            for note in notes
+        ]
+        response = requests.post(
+            f"{self.mealie_base_url}/api/households/shopping/items/create-bulk",
+            json=payload,
+            headers={"Authorization": f"Bearer {self.mealie_api_key}"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if isinstance(result, dict):
+            created = result.get("createdItems", result.get("created_items"))
+            if isinstance(created, list):
+                return len(created)
+            if isinstance(created, int):
+                return created
+        return len(notes)
 
     def get_mealplan_entries(self, start_date: date, end_date: date) -> list[dict]:
         response = requests.get(
