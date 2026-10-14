@@ -1,5 +1,6 @@
 import asyncio
 import copy
+from datetime import date
 import logging
 import signal
 import sys
@@ -89,6 +90,21 @@ class MealieBringAPI:
 
             self._schedule_move_ingredients_from_shopping_list()
 
+            return "OK"
+
+        @base_bp.route("/move-ingredients-from-mealplan", methods=["POST"])
+        def move_mealplan_notes_to_bring() -> str | tuple[str, int]:
+            if not self.mealie_handler.mealie_is_setup:
+                self.logger.log.warning("Mealie is not setup! See the logs above for more information.")
+                return "", 400
+            try:
+                start_date = date.fromisoformat(request.args.get("start_date", ""))
+                end_date = date.fromisoformat(request.args.get("end_date", ""))
+            except ValueError:
+                return "Valid start_date and end_date are required (YYYY-MM-DD).", 400
+            if end_date < start_date:
+                return "end_date must be on or after start_date.", 400
+            self._move_mealplan_notes_to_bring(start_date, end_date)
             return "OK"
 
         @base_bp.route("/status", methods=["GET"])
@@ -198,6 +214,53 @@ class MealieBringAPI:
         finally:
             with self.move_debounce_lock:
                 self.ignore_shopping_list_events_until = time.monotonic() + SHOPPING_LIST_EVENT_SUPPRESSION_SECONDS
+
+    @staticmethod
+    def _normalize_duplicate_key(value: str) -> str:
+        return " ".join(value.split()).casefold()
+
+    @staticmethod
+    def _mealplan_note_text(entry: dict) -> str | None:
+        if entry.get("recipeId") or entry.get("recipe_id") or entry.get("recipe"):
+            return None
+        title = entry.get("title")
+        if not isinstance(title, str) or not title.strip():
+            return None
+        return title.strip()
+
+    def _move_mealplan_notes_to_bring(self, start_date: date, end_date: date) -> None:
+        entries = self.mealie_handler.get_mealplan_entries(start_date, end_date)
+        candidates: list[Ingredient] = []
+        seen: set[str] = set()
+        for entry in entries:
+            note = self._mealplan_note_text(entry)
+            if note is None:
+                continue
+            key = self._normalize_duplicate_key(note)
+            if key and key not in seen:
+                seen.add(key)
+                candidates.append(Ingredient(name=note))
+        if not candidates:
+            self.logger.log.info("No mealplan notes found in the requested date range")
+            return
+
+        existing_names = {
+            self._normalize_duplicate_key(name)
+            for name in self.mealie_handler.get_shopping_item_names()
+            if isinstance(name, str) and name.strip()
+        }
+        with self.loop_lock:
+            existing_names.update(
+                self._normalize_duplicate_key(name)
+                for name in self.loop.run_until_complete(self.bring_handler.get_existing_item_names())
+                if isinstance(name, str) and name.strip()
+            )
+        additions = [item for item in candidates if self._normalize_duplicate_key(item.name) not in existing_names]
+        self.logger.log.info(
+            "Mealplan note transfer for %s through %s: %d note(s), %d new item(s)",
+            start_date.isoformat(), end_date.isoformat(), len(candidates), len(additions),
+        )
+        self._add_ingredients_to_bring(additions)
 
     def _add_ingredients_to_bring(self, ingredients_to_add: list[Ingredient]) -> None:
         if not ingredients_to_add:

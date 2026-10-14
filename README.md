@@ -135,6 +135,19 @@ After deploying the container, you need to set up the actions you want to use.
    ![actions after adding](./assets/images/actions_after_adding.png)
 7. Try it out 🎉
 
+#### Additional action: Adding mealplan notes to Bring for an explicit date range
+
+Mealie's built-in recipe action sends the selected recipe to the integration, but does not include the currently displayed mealplan date range. The shopping-list notifier likewise contains no reliable range. This action therefore takes explicit start and end dates in its URL; it never guesses dates. On Mealie 3.26 and later, allow the bridge host in Mealie's HTTP_ALLOW_LIST (in this deployment: mealie-bring-api).
+
+1. Create another Mealie recipe action.
+2. Set its method to POST.
+3. Set the URL to the Bring API endpoint and specify the exact inclusive date range, for example:
+   http://mealie-bring-api:8742/move-ingredients-from-mealplan?start_date=2026-10-12&end_date=2026-10-18
+4. Give it a clear title such as “Mealplan-Notizen zur Bring-Liste”.
+5. Save and trigger it from any recipe when that configured period is the one to transfer.
+
+The integration reads /api/households/mealplans with those dates, selects note-only entries (entries without recipeId) and sends each non-empty title to Bring as-is. It ignores recipe entries, filters the returned data again to the requested dates, skips duplicates already present on the configured Mealie shopping list or Bring list, and never deletes or edits Mealie entries. Update the dates in the action URL before using it for a different period. The normal recipe action and shopping-list workflow are unchanged.
+
 #### Action 2: Moving ingredients from a shopping list to Bring (optional)
 
 If you don't want to use this action, you can skip this entirely.

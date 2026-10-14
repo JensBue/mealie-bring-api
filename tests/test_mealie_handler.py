@@ -229,3 +229,27 @@ def test_delete_items_from_shopping_list(mealie_handler, mock_requests):
             "Authorization": f"Bearer {mealie_handler.mealie_api_key}"
         }
         assert mock_delete.call_args_list[i][1]["timeout"] == 20
+
+
+def test_get_mealplan_entries_uses_explicit_range_and_filters_unexpected_dates(mealie_handler):
+    from datetime import date
+
+    response = MagicMock(spec=requests.Response)
+    response.raise_for_status = MagicMock()
+    response.json.return_value = {
+        "items": [
+            {"id": "in-range", "date": "2026-10-14", "title": "Pommes"},
+            {"id": "too-early", "date": "2026-10-13", "title": "Baguette"},
+            {"id": "too-late", "date": "2026-10-19", "title": "Pizza"},
+        ]
+    }
+    with patch("requests.get", return_value=response) as mock_get:
+        entries = mealie_handler.get_mealplan_entries(date(2026, 10, 14), date(2026, 10, 18))
+
+    assert [entry["id"] for entry in entries] == ["in-range"]
+    mock_get.assert_called_once_with(
+        f"{mealie_handler.mealie_base_url}/api/households/mealplans",
+        params={"start_date": "2026-10-14", "end_date": "2026-10-18", "perPage": -1},
+        headers={"Authorization": f"Bearer {mealie_handler.mealie_api_key}"},
+        timeout=20,
+    )

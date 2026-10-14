@@ -50,6 +50,14 @@ class BringHandler(LoggerMixin):
         self.log.critical(f'Can not find a list with the name "{list_name}"')
         sys.exit(1)
 
+    async def get_existing_item_names(self) -> set[str]:
+        bring_list = await self.bring.get_list(self.list_uuid)
+        return {
+            item.itemId
+            for item in bring_list.items.purchase
+            if getattr(item, "itemId", None)
+        }
+
     async def add_items(self, ingredients: list[Ingredient]) -> None:
         await self.bring.batch_update_list(
             self.list_uuid, [ingredient.to_dict() for ingredient in ingredients], BringItemOperation.ADD

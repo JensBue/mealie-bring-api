@@ -14,6 +14,8 @@ from source.mealie_bring_api import (
 )
 from source.mealie_handler import MealieHandler
 
+_REAL_CREATE_APP = MealieBringAPI._create_app
+
 
 @pytest.fixture
 def mock_event_loop():
@@ -356,3 +358,96 @@ def test_handle_stop_signal_flushes_pending_debounced_move(mealie_app):
     pending_timer.cancel.assert_called_once()
     mock_move.assert_called_once()
     assert mealie_app.move_debounce_timer is None
+
+
+def test_mealplan_note_text_ignores_recipes_and_invalid_notes():
+    assert MealieBringAPI._mealplan_note_text({"title": "  TK-Pizza  "}) == "TK-Pizza"
+    assert MealieBringAPI._mealplan_note_text({"title": "Pommes", "recipeId": "recipe-1"}) is None
+    assert MealieBringAPI._mealplan_note_text({"title": "Pommes", "recipe": {"id": "recipe-1"}}) is None
+    assert MealieBringAPI._mealplan_note_text({"title": "   "}) is None
+    assert MealieBringAPI._mealplan_note_text({"title": None}) is None
+    assert MealieBringAPI._mealplan_note_text({}) is None
+
+
+@pytest.mark.parametrize(
+    ("entries", "shopping_names", "bring_names", "expected"),
+    [
+        (
+            [{"title": "Schnitzel", "recipeId": "recipe-1"}],
+            [],
+            set(),
+            [],
+        ),
+        (
+            [{"title": "Schnitzel", "recipeId": "recipe-1"}, {"title": "Pommes"}],
+            [],
+            set(),
+            ["Pommes"],
+        ),
+        (
+            [{"title": "Pommes"}, {"title": "Baguette"}, {"title": "Coleslaw"}],
+            [],
+            set(),
+            ["Pommes", "Baguette", "Coleslaw"],
+        ),
+        (
+            [{"title": "TK-Pizza"}, {"title": "  "}, {"title": ""}],
+            [],
+            set(),
+            ["TK-Pizza"],
+        ),
+        (
+            [{"title": "Pommes"}, {"title": " pommes "}, {"title": "Baguette"}],
+            [],
+            set(),
+            ["Pommes", "Baguette"],
+        ),
+        (
+            [{"title": "Pommes"}, {"title": "Baguette"}, {"title": "TK-Pizza"}],
+            [" pommes "],
+            {"Baguette"},
+            ["TK-Pizza"],
+        ),
+        (
+            [{"title": "  Grüner Salat mit Öl  "}],
+            [],
+            set(),
+            ["Grüner Salat mit Öl"],
+        ),
+    ],
+)
+def test_move_mealplan_notes_to_bring_filters_and_deduplicates(
+    mealie_app, entries, shopping_names, bring_names, expected
+):
+    from datetime import date
+
+    mealie_app.mealie_handler.get_mealplan_entries.return_value = entries
+    mealie_app.mealie_handler.get_shopping_item_names.return_value = shopping_names
+    mealie_app.bring_handler.get_existing_item_names = lambda: bring_names
+    mealie_app.loop.run_until_complete.side_effect = lambda result: result
+
+    with patch.object(mealie_app, "_add_ingredients_to_bring") as add_items:
+        mealie_app._move_mealplan_notes_to_bring(date(2026, 10, 14), date(2026, 10, 18))
+
+    if expected:
+        added = add_items.call_args.args[0]
+        assert [item.name for item in added] == expected
+        assert all(item.specification is None for item in added)
+    else:
+        add_items.assert_not_called()
+
+
+def test_mealplan_note_range_validation_route(mealie_app):
+    from flask import Flask
+
+    mealie_app.mealie_handler.mealie_is_setup = True
+    with patch("source.mealie_bring_api.app", Flask("test-mealie-bring")):
+        test_app = _REAL_CREATE_APP(mealie_app)
+    client = test_app.test_client()
+
+    missing_dates = client.post("/move-ingredients-from-mealplan")
+    reversed_dates = client.post(
+        "/move-ingredients-from-mealplan?start_date=2026-10-19&end_date=2026-10-14"
+    )
+    assert missing_dates.status_code == 400
+    assert reversed_dates.status_code == 400

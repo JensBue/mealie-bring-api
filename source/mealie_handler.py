@@ -1,4 +1,5 @@
 import sys
+from datetime import date
 
 import requests
 from requests.exceptions import JSONDecodeError
@@ -71,6 +72,37 @@ class MealieHandler(LoggerMixin):
             ]
 
         return items_on_shopping_list
+
+    def get_shopping_item_names(self) -> list[str]:
+        names = []
+        for item in self.get_items_on_shopping_list():
+            for key in ("display", "note"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    names.append(value.strip())
+        return names
+
+    def get_mealplan_entries(self, start_date: date, end_date: date) -> list[dict]:
+        response = requests.get(
+            f"{self.mealie_base_url}/api/households/mealplans",
+            params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat(), "perPage": -1},
+            headers={"Authorization": f"Bearer {self.mealie_api_key}"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, list):
+            entries = data
+        elif isinstance(data, dict) and isinstance(data.get("items"), list):
+            entries = data["items"]
+        else:
+            raise ValueError("Mealie returned invalid mealplan data")
+        return [
+            entry for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("date") is not None
+            and start_date.isoformat() <= str(entry["date"])[:10] <= end_date.isoformat()
+        ]
 
     def delete_items_from_shopping_list(self, items_on_shopping_list: list[dict]) -> None:
         item_ids = [item["id"] for item in items_on_shopping_list]
