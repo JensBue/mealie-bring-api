@@ -65,6 +65,7 @@ def mealie_handler(monkeypatch, mock_env_getter, mock_requests):
 
 
 def test_init_with_complete_config(mock_env_getter, mock_requests, mock_env_vars, caplog):
+    caplog.set_level(logging.INFO)
     with patch.object(
         EnvironmentVariableGetter, "get", side_effect=lambda var_name, default="": mock_env_vars.get(var_name, default)
     ):
@@ -79,6 +80,7 @@ def test_init_with_complete_config(mock_env_getter, mock_requests, mock_env_vars
 
 
 def test_init_with_incomplete_config(mock_env_getter, caplog):
+    caplog.set_level(logging.INFO)
     with patch.object(EnvironmentVariableGetter, "get", side_effect=lambda var_name, default="": ""):
         with patch.object(MealieHandler, "_try_api_key") as mock_try_api_key:
             handler = MealieHandler()
@@ -96,6 +98,7 @@ def test_init_with_incomplete_config(mock_env_getter, caplog):
 
 
 def test_init_with_mealie_set_up_but_no_shopping_list_uuid(mock_env_getter, mock_env_vars, mock_requests, caplog):
+    caplog.set_level(logging.INFO)
     env_vars_without_uuid = mock_env_vars.copy()
     del env_vars_without_uuid["MEALIE_SHOPPING_LIST_UUID"]
 

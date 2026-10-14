@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,7 +21,7 @@ _REAL_CREATE_APP = MealieBringAPI._create_app
 @pytest.fixture
 def mock_event_loop():
     loop = MagicMock(spec=asyncio.AbstractEventLoop)
-    loop.run_until_complete = MagicMock()
+    loop.run_until_complete = MagicMock(side_effect=asyncio.run)
     loop.stop = MagicMock()
     return loop
 
@@ -152,8 +153,8 @@ def test_process_recipe_data_ignores_empty_parsed_ingredient(mealie_app, example
 def test_add_ingredients_to_bring_empty_list(mealie_app):
     mealie_app._add_ingredients_to_bring([])
 
-    mealie_app.bring_handler.add_items.assert_not_called()
-    mealie_app.bring_handler.notify_users_about_changes_in_list.assert_not_called()
+    mealie_app.bring_handler.add_items.assert_not_awaited()
+    mealie_app.bring_handler.notify_users_about_changes_in_list.assert_not_awaited()
 
 
 def test_add_ingredients_to_bring_with_ingredients(mealie_app, first_ingredient, second_ingredient):
@@ -161,8 +162,8 @@ def test_add_ingredients_to_bring_with_ingredients(mealie_app, first_ingredient,
 
     mealie_app._add_ingredients_to_bring(ingredients)
 
-    mealie_app.bring_handler.add_items.assert_called_once_with(ingredients)
-    mealie_app.bring_handler.notify_users_about_changes_in_list.assert_called_once()
+    mealie_app.bring_handler.add_items.assert_awaited_once_with(ingredients)
+    mealie_app.bring_handler.notify_users_about_changes_in_list.assert_awaited_once()
 
 
 def test_move_ingredients_from_shopping_list_to_bring(mealie_app):
@@ -181,6 +182,7 @@ def test_move_ingredients_from_shopping_list_to_bring(mealie_app):
 
 
 def test_move_ingredients_from_empty_shopping_list_does_not_call_bring_or_delete(mealie_app, caplog):
+    caplog.set_level(logging.INFO)
     mealie_app.mealie_handler.get_items_on_shopping_list.return_value = []
 
     with patch.object(mealie_app, "_add_ingredients_to_bring") as mock_add_ingredients_to_bring:
@@ -192,6 +194,7 @@ def test_move_ingredients_from_empty_shopping_list_does_not_call_bring_or_delete
 
 
 def test_schedule_move_ingredients_ignores_events_during_active_export(mealie_app, caplog):
+    caplog.set_level(logging.INFO)
     mealie_app.move_export_is_running = True
 
     with patch("source.mealie_bring_api.threading.Timer") as mock_timer_cls:
@@ -202,6 +205,7 @@ def test_schedule_move_ingredients_ignores_events_during_active_export(mealie_ap
 
 
 def test_schedule_move_ingredients_ignores_events_during_suppression_window(mealie_app, caplog):
+    caplog.set_level(logging.INFO)
     mealie_app.ignore_shopping_list_events_until = 10
 
     with (
@@ -340,7 +344,7 @@ def test_handle_stop_signal_stops_loop_and_logs_out(mealie_app, monkeypatch):
     with patch("source.mealie_bring_api.sys.exit") as mock_exit:
         mealie_app._handle_stop_signal(signal_number=2, _frame=None)
 
-        mealie_app.bring_handler.logout.assert_called_once()
+        mealie_app.bring_handler.logout.assert_awaited_once()
         mealie_app.loop.stop.assert_called_once()
         mock_exit.assert_called_once_with(0)
 
