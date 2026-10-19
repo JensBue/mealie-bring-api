@@ -476,3 +476,14 @@ def test_mealplan_note_range_validation_route(mealie_app):
     assert client.post(
         "/add-mealplan-notes-to-shopping-list?start_date=2026-10-19&end_date=2026-10-14"
     ).status_code == 400
+
+
+
+def test_version_endpoint_returns_application_version(monkeypatch):
+    monkeypatch.setenv("APP_VERSION", "1.3.0")
+    mealie_app = object.__new__(MealieBringAPI)
+    mealie_app.basepath = ""
+    app = mealie_app._create_app()
+    response = app.test_client().get("/version")
+    assert response.status_code == 200
+    assert response.json == {"version": "1.3.0"}

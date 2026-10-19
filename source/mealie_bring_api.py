@@ -2,6 +2,7 @@ import asyncio
 import copy
 from datetime import date
 import logging
+import os
 import signal
 import sys
 import threading
@@ -74,6 +75,10 @@ class MealieBringAPI:
 
     def _create_app(self) -> Flask:
         base_bp = Blueprint("base_bp", __name__, url_prefix=self.basepath)
+
+        @base_bp.get("/version")
+        def version() -> dict[str, str]:
+            return jsonify(version=os.environ.get("APP_VERSION", "unknown"))
 
         @base_bp.route("/", methods=["POST"])
         def copy_ingredients_from_recipe_to_bring() -> str:

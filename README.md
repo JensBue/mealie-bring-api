@@ -267,3 +267,8 @@ or
 $ curl -s -o /dev/null -w "%{http_code}" https://mealie-bring-api.yourlocaldomain.com/status
 200
 ```
+
+
+## Versionierung
+
+Die zentrale Version ist `[tool.poetry].version` in `pyproject.toml` (aktuell `1.3.0`); erhöhe sie bei einer bewusst veröffentlichten Bereitstellung. Baue aus dem Homeserver-Repository-Stamm mit `scripts/build-versioned-app.sh mealie-bring-api` und deploye anschließend den Dienst mit `docker compose -f docker/mealie/compose.yaml up -d --no-deps bring-api`. Der Build übernimmt Version, Commit und UTC-Buildzeit automatisch in die OCI-Labels. Auslesen: `docker image inspect mealie-bring-api:local`; die laufende Version liefert `GET /version`.
